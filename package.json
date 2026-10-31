@@ -1,0 +1,39 @@
+{
+  "name": "learn-stripe",
+  "version": "1.0.0",
+  "description": "Runnable companion project for the Learn Stripe masterclass: Checkout Sessions, signature-verified webhooks, idempotent fulfillment and refunds in TypeScript + Express.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch --env-file=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\""
+  },
+  "keywords": [
+    "stripe",
+    "payments",
+    "checkout",
+    "webhooks",
+    "express",
+    "typescript"
+  ],
+  "author": "The Learning Hub",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "stripe": "^23.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
