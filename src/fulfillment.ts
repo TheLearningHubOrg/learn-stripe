@@ -18,11 +18,18 @@ export function handleStripeEvent(event: Stripe.Event, store: OrderStore): Handl
     case 'checkout.session.completed': {
       const session = event.data.object;
       const orderId = orderIdFrom(session);
-      if (!orderId || !store.get(orderId)) return 'ignored';
+      const order = orderId ? store.get(orderId) : undefined;
+      if (!order) return 'ignored';
+      const piId = paymentIntentId(session.payment_intent);
+      // Events can arrive out of order: if an async_payment_* event already settled
+      // the order, keep that outcome and only record the PaymentIntent id.
+      if (order.status !== 'pending' && order.status !== 'awaiting_payment') {
+        if (piId && !order.paymentIntentId) store.update(order.id, { paymentIntentId: piId });
+        return 'ignored';
+      }
       // Cards report 'paid' immediately; bank debits report 'unpaid' and settle later.
       const status = session.payment_status === 'unpaid' ? 'awaiting_payment' : 'paid';
-      const piId = paymentIntentId(session.payment_intent);
-      store.update(orderId, { status, ...(piId ? { paymentIntentId: piId } : {}) });
+      store.update(order.id, { status, ...(piId ? { paymentIntentId: piId } : {}) });
       return 'handled';
     }
     case 'checkout.session.async_payment_succeeded': {

@@ -234,6 +234,17 @@ describe('learn-stripe companion service', () => {
       assert.equal(store.get(orderId)!.status, 'paid');
     });
 
+    it('keeps a settled outcome when checkout.session.completed arrives late', async () => {
+      const { orderId } = await createOrder();
+      await deliver(eventFixture('checkout.session.async_payment_succeeded', checkoutSessionObject(orderId)));
+      const late = await deliver(
+        eventFixture('checkout.session.completed', checkoutSessionObject(orderId, { payment_status: 'unpaid' })),
+      );
+      assert.equal(late.body.result, 'ignored');
+      assert.equal(store.get(orderId)!.status, 'paid');
+      assert.equal(store.get(orderId)!.paymentIntentId, 'pi_test_fixture_1');
+    });
+
     it('marks delayed payment failures', async () => {
       const { orderId } = await createOrder();
       await deliver(eventFixture('checkout.session.completed', checkoutSessionObject(orderId, { payment_status: 'unpaid' })));

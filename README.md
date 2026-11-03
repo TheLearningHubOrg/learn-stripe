@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Stripe API](https://img.shields.io/badge/Stripe%20API-Current%20Stable-635BFF.svg?logo=stripe)](https://docs.stripe.com/api)
-[![Node.js](https://img.shields.io/badge/Node.js-20+-339933.svg?logo=node.js)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-22+-339933.svg?logo=node.js)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6.svg?logo=typescript)](https://www.typescriptlang.org/)
 [![Express](https://img.shields.io/badge/Express-5.x-000000.svg?logo=express)](https://expressjs.com/)
 [![Production Ready](https://img.shields.io/badge/Status-Enterprise%20Grade-brightgreen.svg)](https://github.com/TheLearningHubOrg/learn-stripe)
@@ -505,12 +505,12 @@ flowchart TD
 
 ### 2.6 Embedded Checkout, Payment Links & Customisation
 
-Embedded Checkout keeps the same server-side session but renders it inside your page. Create the session with the embedded UI mode and return its `client_secret` instead of a URL; the client mounts it with Stripe.js.
+Embedded Checkout keeps the same server-side session but renders it inside your page. Create the session with `ui_mode: 'embedded_page'` (the default is `hosted_page`) and return its `client_secret` instead of a URL; the client mounts it with Stripe.js. Older API versions called these modes `embedded` and `hosted`; the current SDK uses the `_page` names.
 
 ```typescript
 // Server: embedded mode returns a client_secret instead of a redirect URL
 const session = await stripe.checkout.sessions.create({
-  ui_mode: 'embedded',
+  ui_mode: 'embedded_page',
   mode: 'payment',
   line_items: [{ price: priceId, quantity: 1 }],
   return_url: `${baseUrl}/orders/${orderId}?session_id={CHECKOUT_SESSION_ID}`,
@@ -521,11 +521,17 @@ res.json({ clientSecret: session.client_secret });
 
 ```typescript
 // Browser: mount Checkout inside a <div id="checkout"></div>
+// (/checkout-sessions/embedded is your own route wrapping the server code above)
 import { loadStripe } from '@stripe/stripe-js';
 
 const stripe = await loadStripe('pk_test_...');
-const { clientSecret } = await fetch('/checkout-sessions/embedded', { method: 'POST' }).then((r) => r.json());
-const checkout = await stripe!.initEmbeddedCheckout({ fetchClientSecret: async () => clientSecret });
+const checkout = await stripe!.createEmbeddedCheckoutPage({
+  fetchClientSecret: async () => {
+    const res = await fetch('/checkout-sessions/embedded', { method: 'POST' });
+    const { clientSecret } = (await res.json()) as { clientSecret: string };
+    return clientSecret;
+  },
+});
 checkout.mount('#checkout');
 ```
 
@@ -804,7 +810,7 @@ export function stripeWebhookVerifier(stripe: Stripe, endpointSecret: string, to
 
 ### 4.3 Raw Bodies in Express
 
-The most common webhook bug in Node.js: a global `express.json()` parses the body before your handler sees it. Re-serialising that object changes whitespace and key order, the HMAC no longer matches, and every event fails with "No signatures found matching the expected signature".
+The most common webhook bug in Node.js: a global `express.json()` parses the body before your handler sees it. Re-serialising that object changes whitespace and key order, the HMAC no longer matches, and every event fails with "No signatures found matching the expected signature for payload".
 
 ```
 BROKEN                                       FIXED
@@ -868,15 +874,23 @@ Stripe guarantees **at-least-once** delivery and **does not guarantee ordering**
 // src/fulfillment.ts (excerpt): monotonic, replay-safe transitions
 case 'checkout.session.completed': {
   const session = event.data.object;
-  const orderId = session.client_reference_id ?? session.metadata?.orderId;
-  if (!orderId || !store.get(orderId)) return 'ignored';
+  const orderId = orderIdFrom(session); // client_reference_id, then metadata.orderId
+  const order = orderId ? store.get(orderId) : undefined;
+  if (!order) return 'ignored';
+  const piId = paymentIntentId(session.payment_intent);
+  // A late "completed" must not undo an async_payment_* outcome that already landed
+  if (order.status !== 'pending' && order.status !== 'awaiting_payment') {
+    if (piId && !order.paymentIntentId) store.update(order.id, { paymentIntentId: piId });
+    return 'ignored';
+  }
   // Cards report 'paid' immediately; bank debits report 'unpaid' and settle later
   const status = session.payment_status === 'unpaid' ? 'awaiting_payment' : 'paid';
-  store.update(orderId, { status, paymentIntentId: idOf(session.payment_intent) });
+  store.update(order.id, { status, ...(piId ? { paymentIntentId: piId } : {}) });
   return 'handled';
 }
 case 'checkout.session.expired': {
-  const order = store.get(orderIdFrom(event.data.object) ?? '');
+  const orderId = orderIdFrom(event.data.object);
+  const order = orderId ? store.get(orderId) : undefined;
   if (!order || order.status !== 'pending') return 'ignored'; // never downgrade a paid order
   store.update(order.id, { status: 'expired' });
   return 'handled';
@@ -1282,7 +1296,7 @@ A disciplined test pyramid for a Stripe integration:
           /----\      Contract: stripe trigger / test clocks against a sandbox
          /      \
         /--------\    Integration: Express app + fake gateway + REAL webhook signatures
-       /          \   (tests/app.test.ts: 19 tests, zero network calls)
+       /          \   (tests/app.test.ts: 20 tests, zero network calls)
       /------------\  Unit: pricing, money math, state transitions
 ```
 
@@ -1312,7 +1326,7 @@ const sub = await stripe.subscriptions.create({
 
 // 3. Jump 8 days ahead: the trial converts and the first invoice is attempted
 await stripe.testHelpers.testClocks.advance(clock.id, {
-  frozen_time: Math.floor(Date.now() / 1000) + 8 * 24 * 60 * 60,
+  frozen_time: clock.frozen_time + 8 * 24 * 60 * 60, // relative to the clock, not the wall clock
 });
 // Poll until clock.status === 'ready', then assert on webhooks and sub.status
 ```
@@ -1457,7 +1471,7 @@ Log every Stripe interaction as structured JSON with the identifiers needed to j
 #### Q3: Explain exactly how Stripe webhook signature verification works and what it protects against.
 > **Answer**: Stripe computes HMAC-SHA256 over `timestamp + "." + raw body` using the endpoint's `whsec_` secret and sends `t=` and one or more `v1=` values in `Stripe-Signature`. The receiver recomputes the HMAC over the exact bytes, compares in constant time, and rejects timestamps outside a tolerance (300 seconds by default). This defeats forged events, body tampering and replay of captured deliveries. It does not prevent duplicates from Stripe itself, which is why dedupe on `event.id` is still required.
 
-#### Q4: Every webhook in production fails with "No signatures found matching the expected payload" after a refactor. What happened?
+#### Q4: Every webhook in production fails with "No signatures found matching the expected signature for payload" after a refactor. What happened?
 > **Answer**: Almost always the raw body was lost: a global `express.json()` (or a framework body parser, API gateway transform or logging middleware) parsed and re-serialised the payload before verification. Other causes are using the CLI's `whsec_` in production, using a test-mode secret for a live endpoint, or trimming whitespace. Mount `express.raw({ type: 'application/json' })` on the webhook route ahead of JSON parsing and verify the secret belongs to that endpoint and mode.
 
 #### Q5: How do you make webhook processing idempotent under at-least-once delivery?

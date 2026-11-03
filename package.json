@@ -22,7 +22,7 @@
   "author": "The Learning Hub",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "express": "^5.3.0",
